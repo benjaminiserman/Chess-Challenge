@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Linq;
 using ChessChallenge.API;
-using ChessChallenge.Example;
+using Microsoft.CodeAnalysis;
 
 class MyBot : IChessBot
 {
@@ -14,18 +14,27 @@ class MyBot : IChessBot
 
 		var moveToPlay = moves[0];
 
-		var preferredMoves = moves.Where(move =>
-			(move.MovePieceType != PieceType.King || move.IsCastles)
-			&& !board.SquareIsAttackedByOpponent(move.TargetSquare)
-			&& move.PromotionPieceType is PieceType.None or PieceType.Queen
-			&& !MoveIsDraw(move)
-			&& !AllowsMateInOne(move)
-			&& !MoveIsSacrifice(move));
+		// en passant is forced (it's the law)
+		var enPassant = moves.Where(move => move.IsEnPassant);
+		if (enPassant.Any())
+		{
+			return enPassant.First();
+		}
+
+		var preferredMoves = moves
+			.Where(move => !board.SquareIsAttackedByOpponent(move.TargetSquare)
+				&& !MoveIsDraw(move)
+				&& !AllowsMateInOne(move)
+				&& !MoveIsSacrifice(move))
+			.OrderBy(move => Math.Abs(pieceValues[(int)move.MovePieceType] - 300));
 
 		if (preferredMoves.Any())
 		{
+			//Console.WriteLine("a");
+			//Console.WriteLine(string.Join("\n", preferredMoves.Select(move => $" - {move}")));
 			moveToPlay = preferredMoves.First();
 		}
+		
 
 		bool isOnStartRows(Square square) => board.IsWhiteToMove
 			? square.Rank <= 1
@@ -34,11 +43,19 @@ class MyBot : IChessBot
 		var developingMoves = preferredMoves.Where(move => isOnStartRows(move.StartSquare) && !isOnStartRows(move.TargetSquare));
 		if (developingMoves.Any())
 		{
+			//Console.WriteLine("b");
 			moveToPlay = developingMoves.First();
 		}
 
-		if (board.PlyCount <= 5)
+		if (moves.Any(move => move.IsCastles))
 		{
+			//Console.WriteLine("castle");
+			moveToPlay = moves.First(move => move.IsCastles);
+		}
+
+		if (board.PlyCount <= 5) // always play for scholar's mate
+		{
+			//Console.WriteLine("c");
 			var gotMove = preferredMoves.Where(move => board.PlyCount switch
 			{
 				0 => move.MovePieceType == PieceType.Pawn && move.TargetSquare == new Square("e4"),
@@ -56,25 +73,43 @@ class MyBot : IChessBot
 		}
 
 		var protectiveMoves = moves
-			.Where(move => board.SquareIsAttackedByOpponent(move.StartSquare) && !board.SquareIsAttackedByOpponent(move.TargetSquare));
+			.Where(move => board.SquareIsAttackedByOpponent(move.StartSquare)
+				&& !IsProtected(move.StartSquare, board)
+				&& (!board.SquareIsAttackedByOpponent(move.TargetSquare)
+					|| pieceValues[(int)move.CapturePieceType] >= pieceValues[(int)move.MovePieceType]));
 		if (protectiveMoves.Any())
 		{
-			moveToPlay = protectiveMoves.First();
+			//Console.WriteLine("d");
+			moveToPlay = protectiveMoves.Where(move => preferredMoves.Contains(move)).FirstOrDefault();
+			if (moveToPlay == default)
+			{
+				moveToPlay = protectiveMoves.First();
+			}
 		}
 
 		var safeChecks = preferredMoves.Where(MoveIsCheck);
 		if (safeChecks.Any())
 		{
+			//Console.WriteLine("e");
 			moveToPlay = safeChecks.First();
 		}
 
 		if (board.PlyCount > 40)
 		{
-			var pawnMoves = preferredMoves.Where(move => move.MovePieceType is PieceType.Pawn && !board.SquareIsAttackedByOpponent(move.TargetSquare));
+			var pawnMoves = preferredMoves.Where(move => move.MovePieceType is PieceType.Pawn 
+				&& !board.SquareIsAttackedByOpponent(move.TargetSquare));
 			if (pawnMoves.Any())
 			{
+				//Console.WriteLine("f");
 				moveToPlay = pawnMoves.First();
 			}
+		}
+
+		var promotionMoves = preferredMoves.Where(move => move.PromotionPieceType == PieceType.Queen);
+		if (promotionMoves.Any())
+		{
+			//Console.WriteLine("g");
+			moveToPlay = promotionMoves.First();
 		}
 
 		var highestValueCapture = 0;
@@ -85,8 +120,9 @@ class MyBot : IChessBot
 				return move;
 			}
 
-			if (MoveIsGoodCapture(move, ref highestValueCapture))
+			if (MoveIsGoodCapture(move, ref highestValueCapture) && !MoveIsSacrifice(move))
 			{
+				//Console.WriteLine("h");
 				moveToPlay = move;
 			}
 		}
@@ -101,6 +137,10 @@ class MyBot : IChessBot
 			if (board.SquareIsAttackedByOpponent(move.TargetSquare))
 			{
 				capturedPieceValue -= myPieceValue;
+			}
+			else if (MoveIsCheck(move))
+			{
+				capturedPieceValue += 1;
 			}
 
 			if (capturedPieceValue > highestValueCapture)
@@ -168,6 +208,18 @@ class MyBot : IChessBot
 
 			board.UndoMove(move);
 			return false;
+		}
+
+		bool IsProtected(Square square, Board board)
+		{
+			if (board.TrySkipTurn())
+			{
+				var isAttacked = board.SquareIsAttackedByOpponent(square);
+				board.UndoSkipTurn();
+				return isAttacked;
+			}
+
+			return true;
 		}
 	}
 }
